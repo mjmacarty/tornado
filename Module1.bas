@@ -1,9 +1,9 @@
+Attribute VB_Name = "SensitivityAnalysis"
 '==============================================================================
 ' SENSITIVITY ANALYSIS ADD-IN
 ' Tornado Chart & Spider Chart Generator
 ' Free to use and distribute
 '==============================================================================
-
 Option Explicit
 
 '--- Constants ----------------------------------------------------------------
@@ -12,8 +12,7 @@ Private Const TORNADO_SHEET As String = "Tornado Chart"
 Private Const SPIDER_SHEET  As String = "Spider Chart"
 Private Const MAX_INPUTS    As Integer = 20
 
-'--- Public Types -------------------------------------------------------------
-' Must be Public to be accessible across the project
+'--- Public Types (must be Public to share across modules) --------------------
 Public Type InputDef
     Label       As String
     cell        As Range
@@ -43,47 +42,40 @@ End Type
 
 '==============================================================================
 ' ENTRY POINT
-' Called by the ribbon button - IRibbonControl parameter is required by Excel
-' even though it is not used by this macro
 '==============================================================================
 Public Sub RunSensitivityAnalysis(control As IRibbonControl)
     Dim cfg As SensitivityConfig
     If Not GetUserInputs(cfg) Then Exit Sub
-
     Application.ScreenUpdating = False
     Application.Calculation = xlCalculationManual
-
     On Error GoTo ErrHandler
-
     Dim results(1 To 20) As SensitivityResult
     Call RunSensitivity(cfg, results)
     Call BuildTornadoChart(results, cfg)
     Call BuildSpiderChart(results, cfg)
     Call RestoreInputs(cfg)
-
     Application.Calculate
     Application.Calculation = xlCalculationAutomatic
     Application.ScreenUpdating = True
-
     MsgBox "Sensitivity analysis complete!" & vbCrLf & _
            "- Tornado Chart tab created" & vbCrLf & _
            "- Spider Chart tab created", vbInformation, ADDIN_NAME
     Exit Sub
-
 ErrHandler:
     Application.Calculation = xlCalculationAutomatic
     Application.ScreenUpdating = True
     MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical, ADDIN_NAME
 End Sub
 
+Public Sub RunFromRibbon(control As IRibbonControl)
+    RunSensitivityAnalysis
+End Sub
+
 '==============================================================================
 ' USER INPUT
-' Walks user through 3 steps to define output cell, input cells, and variation %
 '==============================================================================
 Private Function GetUserInputs(cfg As SensitivityConfig) As Boolean
     GetUserInputs = False
-
-    ' Step 1: Output cell
     Dim outRng As Range
     On Error Resume Next
     Set outRng = Application.InputBox( _
@@ -98,8 +90,6 @@ Private Function GetUserInputs(cfg As SensitivityConfig) As Boolean
     End If
     Set cfg.OutputCell = outRng
     cfg.BaseOutput = outRng.Value
-
-    ' Step 2: Input cells
     Dim inRng As Range
     On Error Resume Next
     Set inRng = Application.InputBox( _
@@ -113,21 +103,16 @@ Private Function GetUserInputs(cfg As SensitivityConfig) As Boolean
         MsgBox "Please select no more than " & MAX_INPUTS & " input cells.", vbExclamation, ADDIN_NAME
         Exit Function
     End If
-
-    ' Step 3: Variation %
     Dim pctStr As String
     pctStr = InputBox( _
         "Enter the percentage variation to apply to each input." & vbCrLf & _
         "Example: enter 10 for +/-10%", _
         ADDIN_NAME & " - Step 3 of 3", "10")
     If pctStr = "" Then Exit Function
-
     Dim defaultPct As Double
     defaultPct = Abs(CDbl(pctStr)) / 100
-
     cfg.NumInputs = inRng.Count
-    cfg.NumPoints = 9  ' Spider chart: 9 points from -40% to +40%
-
+    cfg.NumPoints = 9
     Dim i As Integer
     Dim cell As Range
     i = 1
@@ -139,44 +124,34 @@ Private Function GetUserInputs(cfg As SensitivityConfig) As Boolean
         cfg.Inputs(i).HighPct = defaultPct
         i = i + 1
     Next cell
-
     GetUserInputs = True
 End Function
 
 '==============================================================================
 ' CORE SENSITIVITY CALCULATION
-' Varies each input low/high while holding others at base value
-' Also calculates spider chart data points at -40% to +40%
 '==============================================================================
 Private Sub RunSensitivity(cfg As SensitivityConfig, results() As SensitivityResult)
     Dim i As Integer
     Dim j As Integer
-
     For i = 1 To cfg.NumInputs
         results(i).Label = cfg.Inputs(i).Label
         results(i).LowPct = cfg.Inputs(i).LowPct
         results(i).HighPct = cfg.Inputs(i).HighPct
-
-        ' Low value
+        ' Low
         cfg.Inputs(i).cell.Value = cfg.Inputs(i).BaseValue * (1 + cfg.Inputs(i).LowPct)
         Application.Calculate
         results(i).LowOutput = cfg.OutputCell.Value
-
-        ' High value
+        ' High
         cfg.Inputs(i).cell.Value = cfg.Inputs(i).BaseValue * (1 + cfg.Inputs(i).HighPct)
         Application.Calculate
         results(i).HighOutput = cfg.OutputCell.Value
-
         results(i).Swing = Abs(results(i).HighOutput - results(i).LowOutput)
-
-        ' Restore before calculating spider points
+        ' Restore before spider
         cfg.Inputs(i).cell.Value = cfg.Inputs(i).BaseValue
         Application.Calculate
-
-        ' Spider points: -40% to +40% in 10% steps (9 points)
+        ' Spider points: -40% to +40% in 10% steps
         Dim stepSize As Double
         stepSize = 0.8 / (cfg.NumPoints - 1)
-
         For j = 0 To cfg.NumPoints - 1
             results(i).SpiderPcts(j) = -0.4 + j * stepSize
             If Abs(results(i).SpiderPcts(j)) < 0.0001 Then results(i).SpiderPcts(j) = 0
@@ -184,13 +159,10 @@ Private Sub RunSensitivity(cfg As SensitivityConfig, results() As SensitivityRes
             Application.Calculate
             results(i).SpiderOutputs(j) = cfg.OutputCell.Value
         Next j
-
-        ' Restore input to base value
+        ' Restore
         cfg.Inputs(i).cell.Value = cfg.Inputs(i).BaseValue
         Application.Calculate
     Next i
-
-    ' Sort results by swing descending so biggest impact is at top of tornado
     Call SortResultsBySwing(results, cfg.NumInputs)
 End Sub
 
@@ -211,27 +183,21 @@ End Sub
 
 '==============================================================================
 ' TORNADO CHART
-' Horizontal stacked bar chart showing output range for each input
-' Inputs sorted by swing (widest bar = most sensitive input)
 '==============================================================================
 Private Sub BuildTornadoChart(results() As SensitivityResult, cfg As SensitivityConfig)
     Call DeleteSheet(TORNADO_SHEET)
-
     Dim ws As Worksheet
     Set ws = ActiveWorkbook.Sheets.Add(After:=ActiveWorkbook.Sheets(ActiveWorkbook.Sheets.Count))
     ws.Name = TORNADO_SHEET
-
     Dim n As Integer
     n = cfg.NumInputs
-
-    ' Data table (cols A-E) for reference
+    ' Header
     ws.Cells(1, 1).Value = "Input"
     ws.Cells(1, 2).Value = "Low Output"
     ws.Cells(1, 3).Value = "High Output"
     ws.Cells(1, 4).Value = "Base Output"
     ws.Cells(1, 5).Value = "Swing"
-
-    ' Write rows bottom-to-top so biggest swing appears at top of chart
+    ' Data - written bottom to top so biggest swing appears at chart top
     Dim i As Integer
     Dim r As Integer
     For i = 1 To n
@@ -242,59 +208,49 @@ Private Sub BuildTornadoChart(results() As SensitivityResult, cfg As Sensitivity
         ws.Cells(r, 4).Value = cfg.BaseOutput
         ws.Cells(r, 5).Value = results(i).Swing
     Next i
-
     With ws.Range(ws.Cells(1, 1), ws.Cells(1, 5))
         .Font.Bold = True
         .Interior.Color = RGB(31, 73, 125)
         .Font.Color = RGB(255, 255, 255)
     End With
-
-    ' Chart source data (cols G-J)
-    ' Uses stacked bar trick: invisible spacer + low impact + high impact
+    ' Chart source columns G-J
     ws.Cells(1, 7).Value = "Label"
     ws.Cells(1, 8).Value = "Spacer"
     ws.Cells(1, 9).Value = "Low Impact"
     ws.Cells(1, 10).Value = "High Impact"
-
     Dim baseVal As Double
     baseVal = cfg.BaseOutput
     Dim lo As Double
     Dim hi As Double
-
     For i = 1 To n
         r = n - i + 2
         lo = results(i).LowOutput
         hi = results(i).HighOutput
         ws.Cells(r, 7).Value = results(i).Label
-        ws.Cells(r, 8).Value = WorksheetFunction.Min(lo, hi)  ' left edge of bar
-        ws.Cells(r, 9).Value = Abs(baseVal - lo)              ' distance from base to low
-        ws.Cells(r, 10).Value = Abs(hi - baseVal)             ' distance from base to high
+        ws.Cells(r, 8).Value = WorksheetFunction.Min(lo, hi)
+        ws.Cells(r, 9).Value = Abs(baseVal - lo)
+        ws.Cells(r, 10).Value = Abs(hi - baseVal)
     Next i
-
     With ws.Range(ws.Cells(1, 7), ws.Cells(1, 10))
         .Font.Bold = True
         .Interior.Color = RGB(31, 73, 125)
         .Font.Color = RGB(255, 255, 255)
     End With
     ws.Columns("A:J").AutoFit
-
-    ' Create chart object
+    ' Build chart
     Dim chObj As ChartObject
     Set chObj = ws.ChartObjects.Add( _
         Left:=ws.Columns(7).Left, _
         Top:=ws.Rows(n + 4).Top, _
         Width:=560, _
         Height:=WorksheetFunction.Max(250, n * 28 + 80))
-
     Dim ch As Chart
     Set ch = chObj.Chart
     ch.ChartType = xlBarStacked
-
     Do While ch.SeriesCollection.Count > 0
         ch.SeriesCollection(1).Delete
     Loop
-
-    ' Series 1: Spacer (invisible - positions bars correctly on axis)
+    ' Spacer (invisible)
     Dim sSpacer As Series
     Set sSpacer = ch.SeriesCollection.NewSeries
     sSpacer.Name = "Spacer"
@@ -302,8 +258,7 @@ Private Sub BuildTornadoChart(results() As SensitivityResult, cfg As Sensitivity
     sSpacer.XValues = ws.Range(ws.Cells(2, 7), ws.Cells(n + 1, 7))
     sSpacer.Format.Fill.Visible = msoFalse
     sSpacer.Format.Line.Visible = msoFalse
-
-    ' Series 2: Low impact (red)
+    ' Low impact (red) - no labels to avoid duplicate values
     Dim sLow As Series
     Set sLow = ch.SeriesCollection.NewSeries
     sLow.Name = "Low Impact"
@@ -311,8 +266,7 @@ Private Sub BuildTornadoChart(results() As SensitivityResult, cfg As Sensitivity
     sLow.XValues = ws.Range(ws.Cells(2, 7), ws.Cells(n + 1, 7))
     sLow.Format.Fill.ForeColor.RGB = RGB(192, 0, 0)
     sLow.Format.Line.Visible = msoFalse
-
-    ' Series 3: High impact (blue)
+    ' High impact (blue)
     Dim sHigh As Series
     Set sHigh = ch.SeriesCollection.NewSeries
     sHigh.Name = "High Impact"
@@ -320,8 +274,7 @@ Private Sub BuildTornadoChart(results() As SensitivityResult, cfg As Sensitivity
     sHigh.XValues = ws.Range(ws.Cells(2, 7), ws.Cells(n + 1, 7))
     sHigh.Format.Fill.ForeColor.RGB = RGB(31, 73, 125)
     sHigh.Format.Line.Visible = msoFalse
-
-    ' Series 4: Base value dashed line
+    ' Base line dashed
     Dim sBase As Series
     Set sBase = ch.SeriesCollection.NewSeries
     sBase.ChartType = xlLineMarkers
@@ -336,18 +289,18 @@ Private Sub BuildTornadoChart(results() As SensitivityResult, cfg As Sensitivity
     sBase.Format.Line.DashStyle = msoLineDash
     sBase.Format.Line.Weight = 1.5
     sBase.MarkerStyle = xlMarkerStyleNone
-
     ch.HasTitle = True
     ch.ChartTitle.Text = "Tornado Chart - Sensitivity Analysis"
     ch.ChartTitle.Font.Size = 14
     ch.ChartTitle.Font.Bold = True
     ch.HasLegend = True
     ch.Legend.Position = xlLegendPositionBottom
+    ' Remove spacer from legend (it is series 1)
+    ch.Legend.LegendEntries(1).Delete
     ch.Axes(xlValue).HasTitle = True
     ch.Axes(xlValue).AxisTitle.Text = "Output Value"
     ch.PlotArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
     ch.ChartArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
-
     ws.Cells(n + 3, 7).Value = "How to read: Wider bars = more sensitive. Bars show output range when each input varies low/high."
     ws.Cells(n + 3, 7).Font.Italic = True
     ws.Cells(n + 3, 7).Font.Color = RGB(89, 89, 89)
@@ -355,30 +308,24 @@ End Sub
 
 '==============================================================================
 ' SPIDER CHART
-' Line chart showing output trajectory as each input varies from -40% to +40%
-' Steeper lines = more sensitive inputs
 '==============================================================================
 Private Sub BuildSpiderChart(results() As SensitivityResult, cfg As SensitivityConfig)
     Call DeleteSheet(SPIDER_SHEET)
-
     Dim ws As Worksheet
     Set ws = ActiveWorkbook.Sheets.Add(After:=ActiveWorkbook.Sheets(ActiveWorkbook.Sheets.Count))
     ws.Name = SPIDER_SHEET
-
     Dim n As Integer
     n = cfg.NumInputs
     Dim nPts As Integer
     nPts = cfg.NumPoints
-
-    ' Header row: % change values
+    ' Header row
     ws.Cells(1, 1).Value = "Input \ % Change"
     Dim j As Integer
     For j = 0 To nPts - 1
         ws.Cells(1, j + 2).Value = results(1).SpiderPcts(j)
         ws.Cells(1, j + 2).NumberFormat = "0%"
     Next j
-
-    ' Data rows: one row per input
+    ' Data rows
     Dim i As Integer
     For i = 1 To n
         ws.Cells(i + 1, 1).Value = results(i).Label
@@ -386,7 +333,6 @@ Private Sub BuildSpiderChart(results() As SensitivityResult, cfg As SensitivityC
             ws.Cells(i + 1, j + 2).Value = results(i).SpiderOutputs(j)
         Next j
     Next i
-
     With ws.Range(ws.Cells(1, 1), ws.Cells(1, nPts + 1))
         .Font.Bold = True
         .Interior.Color = RGB(31, 73, 125)
@@ -394,24 +340,19 @@ Private Sub BuildSpiderChart(results() As SensitivityResult, cfg As SensitivityC
         .HorizontalAlignment = xlCenter
     End With
     ws.Columns("A:" & ColLetter(nPts + 1)).AutoFit
-
-    ' Create chart object
+    ' Build chart
     Dim chObj As ChartObject
     Set chObj = ws.ChartObjects.Add( _
         Left:=10, _
         Top:=ws.Rows(n + 4).Top, _
         Width:=580, _
         Height:=380)
-
     Dim ch As Chart
     Set ch = chObj.Chart
     ch.ChartType = xlLine
-
     Do While ch.SeriesCollection.Count > 0
         ch.SeriesCollection(1).Delete
     Loop
-
-    ' Color palette for up to 10 inputs
     Dim colors(0 To 9) As Long
     colors(0) = RGB(31, 73, 125)
     colors(1) = RGB(192, 0, 0)
@@ -423,7 +364,6 @@ Private Sub BuildSpiderChart(results() As SensitivityResult, cfg As SensitivityC
     colors(7) = RGB(146, 208, 80)
     colors(8) = RGB(255, 0, 255)
     colors(9) = RGB(0, 112, 192)
-
     Dim s As Series
     For i = 1 To n
         Set s = ch.SeriesCollection.NewSeries
@@ -437,7 +377,6 @@ Private Sub BuildSpiderChart(results() As SensitivityResult, cfg As SensitivityC
         s.MarkerForegroundColor = colors((i - 1) Mod 10)
         s.MarkerBackgroundColor = colors((i - 1) Mod 10)
     Next i
-
     ch.HasTitle = True
     ch.ChartTitle.Text = "Spider Chart - Sensitivity Analysis"
     ch.ChartTitle.Font.Size = 14
@@ -452,7 +391,6 @@ Private Sub BuildSpiderChart(results() As SensitivityResult, cfg As SensitivityC
     ch.Axes(xlCategory).HasMajorGridlines = True
     ch.PlotArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
     ch.ChartArea.Format.Fill.ForeColor.RGB = RGB(255, 255, 255)
-
     ws.Cells(n + 3, 1).Value = "How to read: Each line shows how the output changes as one input varies from -40% to +40%. Steeper = more sensitive."
     ws.Cells(n + 3, 1).Font.Italic = True
     ws.Cells(n + 3, 1).Font.Color = RGB(89, 89, 89)
@@ -482,7 +420,6 @@ Private Sub DeleteSheet(sheetName As String)
 End Sub
 
 Private Function GetCellLabel(cell As Range) As String
-    ' Try to find a label in the cell to the left or above
     Dim lbl As String
     lbl = ""
     If cell.Column > 1 Then
